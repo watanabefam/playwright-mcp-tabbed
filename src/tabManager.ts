@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { execSync } from 'node:child_process';
 import { Browser, BrowserContext, Page, chromium, firefox, webkit } from 'playwright';
 
 const CHANNEL_MAP: Record<string, { launch: (...args: any[]) => Promise<Browser>; channel?: string }> = {
@@ -161,7 +162,18 @@ export class TabManager {
 
   async close(): Promise<void> {
     if (this.browser) {
-      await this.browser.close();
+      const proc = (this.browser as any).process?.();
+      await this.browser.close().catch(() => {});
+      // Force-kill the browser process tree (child processes often linger
+      // with channel-based launches like msedge).
+      if (proc?.pid) {
+        try {
+          process.kill(-proc.pid, 'SIGKILL');
+        } catch { /* already dead */ }
+        try {
+          process.kill(proc.pid, 'SIGKILL');
+        } catch { /* already dead */ }
+      }
       this.browser = null;
       this.context = null;
       this.tabs.clear();
