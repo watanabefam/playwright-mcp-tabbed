@@ -1,5 +1,18 @@
 import { randomUUID } from 'node:crypto';
-import { Browser, BrowserContext, Page, chromium } from 'playwright';
+import { Browser, BrowserContext, Page, chromium, firefox, webkit } from 'playwright';
+
+const CHANNEL_MAP: Record<string, { launch: (...args: any[]) => Promise<Browser>; channel?: string }> = {
+  chrome: { launch: (opts: any) => chromium.launch(opts) },
+  msedge: { launch: (opts: any) => chromium.launch({ ...opts, channel: 'msedge' }) },
+  firefox: { launch: (opts: any) => firefox.launch(opts) },
+  webkit: { launch: (opts: any) => webkit.launch(opts) },
+};
+
+function getBrowserChannel(): string {
+  const env = process.env.PLAYWRIGHT_MCP_BROWSER || '';
+  if (env && CHANNEL_MAP[env]) return env;
+  return 'chrome';
+}
 
 export type TabListItem = {
   index: number;
@@ -25,7 +38,9 @@ export class TabManager {
 
   async ensureBrowser(): Promise<BrowserContext> {
     if (!this.browser) {
-      this.browser = await chromium.launch({ headless: false });
+      const channel = getBrowserChannel();
+      const entry = CHANNEL_MAP[channel];
+      this.browser = await entry.launch({ headless: false });
       const videoDir = process.env.PLAYWRIGHT_MCP_RECORD_VIDEO_DIR;
       this.context = await this.browser.newContext(
         videoDir ? { recordVideo: { dir: videoDir } } : {}
