@@ -2,11 +2,35 @@ import { randomUUID } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { Browser, BrowserContext, Page, chromium, firefox, webkit } from 'playwright';
 
-const CHANNEL_MAP: Record<string, { launch: (...args: any[]) => Promise<Browser>; channel?: string }> = {
-  chrome: { launch: (opts: any) => chromium.launch(opts) },
-  msedge: { launch: (opts: any) => chromium.launch({ ...opts, channel: 'msedge' }) },
-  firefox: { launch: (opts: any) => firefox.launch(opts) },
-  webkit: { launch: (opts: any) => webkit.launch(opts) },
+function userDataDir(): string | undefined {
+  const dir = process.env.PLAYWRIGHT_MCP_USER_DATA_DIR?.trim();
+  return dir || undefined;
+}
+
+type LaunchFn = (opts: any) => Promise<Browser>;
+type ChannelEntry = {
+  launch: LaunchFn;
+  persistent: (dir: string, opts: any) => Promise<BrowserContext>;
+  channel?: string;
+};
+
+const CHANNEL_MAP: Record<string, ChannelEntry> = {
+  chrome: {
+    launch: (opts) => chromium.launch(opts),
+    persistent: (dir, opts) => chromium.launchPersistentContext(dir, opts),
+  },
+  msedge: {
+    launch: (opts) => chromium.launch({ ...opts, channel: 'msedge' }),
+    persistent: (dir, opts) => chromium.launchPersistentContext(dir, { ...opts, channel: 'msedge' }),
+  },
+  firefox: {
+    launch: (opts) => firefox.launch(opts),
+    persistent: (dir, opts) => firefox.launchPersistentContext(dir, opts),
+  },
+  webkit: {
+    launch: (opts) => webkit.launch(opts),
+    persistent: (dir, opts) => webkit.launchPersistentContext(dir, opts),
+  },
 };
 
 function getBrowserChannel(): string {
@@ -38,14 +62,20 @@ export class TabManager {
   private nextIndex: number = 0;
 
   async ensureBrowser(): Promise<BrowserContext> {
-    if (!this.browser) {
+    if (!this.browser && !this.context) {
       const channel = getBrowserChannel();
       const entry = CHANNEL_MAP[channel];
-      this.browser = await entry.launch({ headless: false });
+      const dir = userDataDir();
       const videoDir = process.env.PLAYWRIGHT_MCP_RECORD_VIDEO_DIR;
-      this.context = await this.browser.newContext(
-        videoDir ? { recordVideo: { dir: videoDir } } : {}
-      );
+      if (dir) {
+        this.context = await entry.persistent(dir, { headless: false, ...(videoDir ? { recordVideo: { dir: videoDir } } : {}) });
+        this.browser = this.context.browser();
+      } else {
+        this.browser = await entry.launch({ headless: false });
+        this.context = await this.browser.newContext(
+          videoDir ? { recordVideo: { dir: videoDir } } : {}
+        );
+      }
     }
     return this.context!;
   }
@@ -161,24 +191,20 @@ export class TabManager {
   }
 
   async close(): Promise<void> {
-    if (this.browser) {
-      const proc = (this.browser as any).process?.();
+    if (this.context) {
+      await this.context.close().catch(() => {});
+    } else if (this.browser) {
       await this.browser.close().catch(() => {});
-      // Force-kill the browser process tree (child processes often linger
-      // with channel-based launches like msedge).
-      if (proc?.pid) {
-        try {
-          process.kill(-proc.pid, 'SIGKILL');
-        } catch { /* already dead */ }
-        try {
-          process.kill(proc.pid, 'SIGKILL');
-        } catch { /* already dead */ }
-      }
-      this.browser = null;
-      this.context = null;
-      this.tabs.clear();
-      this.idToIndex.clear();
     }
+    const proc = (this.browser as any)?.process?.();
+    if (proc?.pid) {
+      try { process.kill(-proc.pid, 'SIGKILL'); } catch { /* already dead */ }
+      try { process.kill(proc.pid, 'SIGKILL'); } catch { /* already dead */ }
+    }
+    this.browser = null;
+    this.context = null;
+    this.tabs.clear();
+    this.idToIndex.clear();
   }
 }
 
